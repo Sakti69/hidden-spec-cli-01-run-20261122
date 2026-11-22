@@ -353,6 +353,10 @@ function uniPath(raw: string): string | null {
 function unifiedEdits(lines: string[], strict: boolean): Edit[] {
   const sections: UniSection[] = [];
   const diffRe = /^diff --git a\/(\S+) b\/(\S+)\s*$/;
+  // A `diff --git` line is one that is exactly that text or starts with it
+  // plus a space; section 6 makes one not of the `a/<X> b/<Y>` form a parse
+  // fault, bare `diff --git` included.
+  const isDiff = (l: string): boolean => l === 'diff --git' || l.startsWith('diff --git ');
   const hunkRe = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
   const isBodyLine = (l: string): boolean => l === '' || l.startsWith(' ') || l.startsWith('-') || l.startsWith('+') || l.startsWith('\\');
   const newSection = (s: UniSection): void => {
@@ -398,7 +402,7 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
     const l = lines[i]!;
     const no = i + 1;
     if (curHunk !== null) {
-      if (l.startsWith('diff --git ')) {
+      if (isDiff(l)) {
         startDiffSection(l, no);
         i++;
         continue;
@@ -426,7 +430,7 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
       inHeader = false;
       // fall through: re-process this line outside the hunk body.
     }
-    if (l.startsWith('diff --git ')) {
+    if (isDiff(l)) {
       startDiffSection(l, no);
       i++;
       continue;
@@ -534,6 +538,9 @@ function srEdits(lines: string[], strict: boolean): Edit[] {
         sep = j;
         break;
       }
+      // A `>>>>>>> REPLACE` line before any `=======` is the section 7 parse
+      // fault: do not let the scan run on into a later block's separator.
+      if (isEnd(lines[j]!)) break;
     }
     let end = -1;
     if (sep >= 0) {
@@ -680,6 +687,10 @@ function v4aEdits(lines: string[], strict: boolean): Edit[] {
     }
     const chunks: VChunk[] = [];
     let curChunk: { anchor: string; eof: boolean; body: Array<{ text: string; no: number }> } | null = null;
+    // True once a chunk was closed by `*** End of File`: a body line after
+    // that cannot start a chunk (section 8 lets a body line start only the
+    // first chunk), so it is a parse fault.
+    let afterEof = false;
     const closeChunk = (): void => {
       if (curChunk === null) return;
       const O: string[] = [];
@@ -704,15 +715,20 @@ function v4aEdits(lines: string[], strict: boolean): Edit[] {
       const t = r.text;
       if (t.startsWith('@@')) {
         closeChunk();
+        afterEof = false;
         curChunk = { anchor: t.slice(2).trim(), eof: false, body: [] };
       } else if (t === '*** End of File') {
         if (curChunk === null) throw new Exit2(`error: parse ${r.no}`);
         curChunk.eof = true;
         closeChunk();
+        afterEof = true;
       } else if (t.startsWith('***')) {
         throw new Exit2(`error: parse ${r.no}`);
       } else if (t.startsWith(' ') || t.startsWith('-') || t.startsWith('+') || t === '') {
-        if (curChunk === null) curChunk = { anchor: '', eof: false, body: [] };
+        if (curChunk === null) {
+          if (afterEof) throw new Exit2(`error: parse ${r.no}`);
+          curChunk = { anchor: '', eof: false, body: [] };
+        }
         curChunk.body.push(r);
       } else {
         throw new Exit2(`error: parse ${r.no}`);
